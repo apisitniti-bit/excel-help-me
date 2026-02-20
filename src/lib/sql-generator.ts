@@ -16,7 +16,7 @@ export function generateInsertSQL(
 
     for (let j = 0; j < headers.length; j++) {
       if (j === config.pkColumn && config.idMode === "generate" && generatedIds) {
-        values.push(`'${generatedIds[i]}'`)
+        values.push(formatSqlValue(generatedIds[i], false))
       } else {
         values.push(formatSqlValue(row[j], config.treatEmptyAsNull))
       }

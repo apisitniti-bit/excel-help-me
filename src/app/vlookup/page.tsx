@@ -109,22 +109,19 @@ export default function VlookupPage() {
     [sheetNames, sheets]
   )
 
-  const getColumnOptions = useCallback(
-    (sheetName: string) => {
-      const s = sheets[sheetName]
-      if (!s) return []
-      return s.headers.map((h, i) => ({
-        value: String(i),
-        label: `${columnIndexToLetter(i)} — ${h}`,
-      }))
-    },
-    [sheets]
-  )
+  const getColumnOptions = (sheetName: string) => {
+    const s = sheets[sheetName]
+    if (!s) return []
+    return s.headers.map((h, i) => ({
+      value: String(i),
+      label: `${columnIndexToLetter(i)} — ${h}`,
+    }))
+  }
 
-  const lookupColOptions = useMemo(() => getColumnOptions(lookupSheet), [lookupSheet, getColumnOptions])
-  const matchColOptions = useMemo(() => getColumnOptions(referenceSheet), [referenceSheet, getColumnOptions])
-  const targetColOptions = useMemo(() => getColumnOptions(targetSheet), [targetSheet, getColumnOptions])
-  const refReturnColOptions = useMemo(() => getColumnOptions(referenceSheet), [referenceSheet, getColumnOptions])
+  const lookupColOptions = useMemo(() => getColumnOptions(lookupSheet), [lookupSheet, sheets])
+  const matchColOptions = useMemo(() => getColumnOptions(referenceSheet), [referenceSheet, sheets])
+  const targetColOptions = useMemo(() => getColumnOptions(targetSheet), [targetSheet, sheets])
+  const refReturnColOptions = useMemo(() => getColumnOptions(referenceSheet), [referenceSheet, sheets])
 
   const addMapping = () => {
     setReturnMappings((m) => [...m, { returnCol: -1, targetCol: -1 }])

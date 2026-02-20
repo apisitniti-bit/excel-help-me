@@ -1,1 +1,6 @@
-{}
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/page": "app/page.js",
+  "/vlookup/page": "app/vlookup/page.js",
+  "/sql-generator/page": "app/sql-generator/page.js"
+}

@@ -16,6 +16,13 @@ export function validateIdConfig(
   const variableLength = totalLength - prefix.length
   const maxValue = Math.pow(10, variableLength) - 1
 
+  if (startNumber < 0) {
+    return {
+      type: "overflow",
+      message: `Starting number cannot be negative.`,
+    }
+  }
+
   if (startNumber + count - 1 > maxValue) {
     return {
       type: "overflow",

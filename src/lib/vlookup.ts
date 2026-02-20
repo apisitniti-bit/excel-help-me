@@ -32,7 +32,7 @@ export function performVlookup(
       results.push({
         row: i,
         matched: false,
-        values: returnMappings.map(() => ""),
+        values: returnMappings.map(() => "N/A"),
       })
       continue
     }
@@ -42,7 +42,7 @@ export function performVlookup(
     if (refRow) {
       matchCount++
       const values = returnMappings.map((m) =>
-        String(refRow[m.returnCol] ?? "")
+        String(refRow[m.returnCol] ?? "N/A")
       )
       results.push({ row: i, matched: true, values })
     } else {
@@ -50,7 +50,7 @@ export function performVlookup(
       results.push({
         row: i,
         matched: false,
-        values: returnMappings.map(() => ""),
+        values: returnMappings.map(() => "N/A"),
       })
     }
   }

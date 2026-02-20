@@ -7,6 +7,7 @@ export interface ParsedSheet {
 export interface VlookupMapping {
   returnCol: number
   targetCol: number
+  columnName: string
 }
 
 export interface VlookupConfig {

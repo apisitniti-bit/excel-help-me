@@ -1,8 +1,6 @@
 "use client"
 
-import React, { useState, useCallback, useMemo } from "react"
-import * as XLSX from "xlsx"
-import { saveAs } from "file-saver"
+import React, { useCallback, useMemo, useEffect } from "react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,7 +8,7 @@ import {
   Settings2,
 } from "lucide-react"
 import { FileUploader } from "@/components/FileUploader"
-import { SpreadsheetPreview } from "@/components/SpreadsheetPreview"
+import { VirtualizedGrid } from "@/components/VirtualizedGrid"
 import { SqlPreview } from "@/components/SqlPreview"
 import { DuplicateWarning } from "@/components/DuplicateWarning"
 import { ExportButtons } from "@/components/ExportButtons"
@@ -32,53 +30,42 @@ import {
 import { generateInsertSQL, generateUpdateSQL } from "@/lib/sql-generator"
 import { generateIds, validateIdConfig } from "@/lib/id-generator"
 import { validate } from "@/lib/validators"
+import { useExcel, type SheetMap } from "@/lib/excel-context"
+import { useWizard } from "@/lib/wizard-context"
+import { useSqlGeneratorContext } from "@/lib/sql-context"
+import { useTranslation } from "@/lib/i18n-context"
 import type {
   ParsedSheet,
   InsertConfig,
   UpdateConfig,
-  ValidationResult,
   WizardStep,
-  CellValue,
 } from "@/types"
 
 export default function SqlGeneratorPage() {
-  const [file, setFile] = useState<File | null>(null)
-  const [sheetNames, setSheetNames] = useState<string[]>([])
-  const [activeSheetName, setActiveSheetName] = useState("")
-  const [activeSheet, setActiveSheet] = useState<ParsedSheet | null>(null)
-  const [step, setStep] = useState<WizardStep>("upload")
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [mode, setMode] = useState<"insert" | "update">("insert")
+  const t = useTranslation()
+  const { file, workbook, sheetNames, sheets, setExcelData, clearExcelData } = useExcel()
+  const { step, setStep, error, setError, isLoading, setLoading, resetWizard } = useWizard()
 
-  // INSERT config
-  const [insertTableName, setInsertTableName] = useState("")
-  const [insertPkCol, setInsertPkCol] = useState(0)
-  const [idMode, setIdMode] = useState<"generate" | "existing">("generate")
-  const [idPrefix, setIdPrefix] = useState("")
-  const [idTotalLength, setIdTotalLength] = useState(14)
-  const [idStartNumber, setIdStartNumber] = useState(1)
-  const [includeColNames, setIncludeColNames] = useState(false)
-  const [treatEmptyAsNull, setTreatEmptyAsNull] = useState(false)
+  // Guard: if URL step is configure/preview but no file is loaded, reset to upload
+  useEffect(() => {
+    if (!file && step !== "upload") {
+      setStep("upload")
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // UPDATE config
-  const [updateTableName, setUpdateTableName] = useState("")
-  const [updatePkCol, setUpdatePkCol] = useState(0)
-  const [setColumns, setSetColumns] = useState<number[]>([])
+  const {
+    mode, setMode,
+    insertConfig, setInsertConfig,
+    updateConfig, setUpdateConfig,
+    sqlStatements, setSqlStatements,
+    validationResult, setValidationResult,
+    idError, setIdError,
+    clearConfig
+  } = useSqlGeneratorContext()
 
-  // Results
-  const [generatedSQL, setGeneratedSQL] = useState<string[]>([])
-  const [validation, setValidation] = useState<ValidationResult>({
-    hasDuplicates: false,
-    duplicates: [],
-    hasEmptyPKs: false,
-    emptyPKRows: [],
-  })
-  const [idError, setIdError] = useState<string | null>(null)
-
-  // Workbook reference for sheet switching
-  const [workbookRef, setWorkbookRef] = useState<XLSX.WorkBook | null>(null)
-  const [allSheets, setAllSheets] = useState<Record<string, ParsedSheet>>({})
+  // Local state for active sheet
+  const [activeSheetName, setActiveSheetName] = React.useState("")
+  const activeSheet = sheets[activeSheetName]
 
   const handleFileSelect = useCallback(async (f: File) => {
     setError(null)
@@ -86,57 +73,46 @@ export default function SqlGeneratorPage() {
     try {
       const wb = await readExcelFile(f)
       const names = getSheetNames(wb)
-      const parsed: Record<string, ParsedSheet> = {}
+      const parsed: SheetMap = {}
       for (const name of names) {
         parsed[name] = parseSheet(wb, name)
       }
-      setFile(f)
-      setWorkbookRef(wb)
-      setSheetNames(names)
-      setAllSheets(parsed)
+      setExcelData(f, wb, names, parsed)
 
       const firstSheet = names[0]
       setActiveSheetName(firstSheet)
-      setActiveSheet(parsed[firstSheet])
       setStep("configure")
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to read file.")
+      setError(err instanceof Error ? err.message : t.common.systemError)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [setExcelData, setStep, setError, setLoading, t.common.systemError])
 
   const handleClear = useCallback(() => {
-    setFile(null)
-    setSheetNames([])
+    clearExcelData()
     setActiveSheetName("")
-    setActiveSheet(null)
-    setStep("upload")
-    setError(null)
-    setGeneratedSQL([])
-    setWorkbookRef(null)
-    setAllSheets({})
-  }, [])
+    resetWizard()
+    clearConfig()
+  }, [clearExcelData, resetWizard, clearConfig])
 
   const handleSheetChange = useCallback(
     (name: string) => {
-      const sheet = allSheets[name]
-      if (sheet) {
+      if (sheets[name]) {
         setActiveSheetName(name)
-        setActiveSheet(sheet)
-        setSetColumns([])
+        setUpdateConfig(prev => ({ ...prev, setColumns: [] }))
       }
     },
-    [allSheets]
+    [sheets, setUpdateConfig]
   )
 
   const sheetOptions = useMemo(
     () =>
       sheetNames.map((n) => ({
         value: n,
-        label: `${n} (${allSheets[n]?.data.length ?? 0} rows)`,
+        label: `${n} (${sheets[n]?.data.length ?? 0} ${t.common.rows})`,
       })),
-    [sheetNames, allSheets]
+    [sheetNames, sheets, t.common.rows]
   )
 
   const columnOptions = useMemo(() => {
@@ -148,25 +124,26 @@ export default function SqlGeneratorPage() {
   }, [activeSheet])
 
   const toggleSetColumn = (colIdx: number) => {
-    setSetColumns((prev) =>
-      prev.includes(colIdx)
-        ? prev.filter((c) => c !== colIdx)
-        : [...prev, colIdx]
-    )
+    setUpdateConfig(prev => ({
+      ...prev,
+      setColumns: prev.setColumns.includes(colIdx)
+        ? prev.setColumns.filter((c) => c !== colIdx)
+        : [...prev.setColumns, colIdx]
+    }))
   }
 
   const canGenerate = useMemo(() => {
     if (!activeSheet || activeSheet.data.length === 0) return false
     if (mode === "insert") {
-      if (!insertTableName.trim()) return false
-      if (idMode === "generate" && (!idPrefix && idTotalLength <= 0)) return false
+      if (!insertConfig.tableName.trim()) return false
+      if (insertConfig.idMode === "generate" && (!insertConfig.idPrefix && insertConfig.idTotalLength <= 0)) return false
       return true
     } else {
-      if (!updateTableName.trim()) return false
-      if (setColumns.length === 0) return false
+      if (!updateConfig.tableName.trim()) return false
+      if (updateConfig.setColumns.length === 0) return false
       return true
     }
-  }, [activeSheet, mode, insertTableName, updateTableName, setColumns, idMode, idPrefix, idTotalLength])
+  }, [activeSheet, mode, insertConfig, updateConfig])
 
   const handleGenerate = useCallback(() => {
     if (!activeSheet) return
@@ -179,171 +156,196 @@ export default function SqlGeneratorPage() {
       let ids: string[] | undefined
       const pkValues: string[] = []
 
-      if (idMode === "generate") {
-        const err = validateIdConfig(idPrefix, idTotalLength, idStartNumber, data.length)
+      if (insertConfig.idMode === "generate") {
+        const err = validateIdConfig(
+          insertConfig.idPrefix,
+          insertConfig.idTotalLength,
+          insertConfig.idStartNumber,
+          data.length
+        )
         if (err) {
-          setIdError(err.message)
+          setIdError({ type: err.type as "prefix_too_long" | "overflow", message: err.message })
           return
         }
         try {
-          ids = generateIds(idPrefix, idTotalLength, idStartNumber, data.length)
+          ids = generateIds(
+            insertConfig.idPrefix,
+            insertConfig.idTotalLength,
+            insertConfig.idStartNumber,
+            data.length
+          )
           ids.forEach((id) => pkValues.push(id))
         } catch (e: unknown) {
-          setIdError(e instanceof Error ? e.message : "ID generation failed.")
+          setIdError({ type: "overflow", message: e instanceof Error ? e.message : "ID generation failed." })
           return
         }
       } else {
         data.forEach((row) => {
-          pkValues.push(String(row[insertPkCol] ?? "").trim())
+          pkValues.push(String(row[insertConfig.pkColumn] ?? "").trim())
         })
       }
 
       const v = validate(pkValues)
-      setValidation(v)
+      setValidationResult(v)
 
-      const config: InsertConfig = {
-        tableName: insertTableName,
-        pkColumn: insertPkCol,
-        idMode,
-        idPrefix,
-        idTotalLength,
-        idStartNumber,
-        includeColumnNames: includeColNames,
-        treatEmptyAsNull,
-      }
-
-      const sql = generateInsertSQL(config, headers, data, ids)
-      setGeneratedSQL(sql)
+      const sql = generateInsertSQL(insertConfig, headers, data, ids)
+      setSqlStatements(sql)
       setStep("preview")
     } else {
       const pkValues = data.map((row) =>
-        String(row[updatePkCol] ?? "").trim()
+        String(row[updateConfig.pkColumn] ?? "").trim()
       )
       const v = validate(pkValues)
-      setValidation(v)
+      setValidationResult(v)
 
-      const filteredSetCols = setColumns.filter((c) => c !== updatePkCol)
-      const config: UpdateConfig = {
-        tableName: updateTableName,
-        pkColumn: updatePkCol,
-        setColumns: filteredSetCols,
-        treatEmptyAsNull,
-      }
+      const filteredSetCols = updateConfig.setColumns.filter((c) => c !== updateConfig.pkColumn)
+      const configWithFilteredCols = { ...updateConfig, setColumns: filteredSetCols }
 
-      const sql = generateUpdateSQL(config, headers, data)
-      setGeneratedSQL(sql)
+      const sql = generateUpdateSQL(configWithFilteredCols, headers, data)
+      setSqlStatements(sql)
       setStep("preview")
     }
   }, [
     activeSheet,
     mode,
-    insertTableName,
-    insertPkCol,
-    idMode,
-    idPrefix,
-    idTotalLength,
-    idStartNumber,
-    includeColNames,
-    treatEmptyAsNull,
-    updateTableName,
-    updatePkCol,
-    setColumns,
+    insertConfig,
+    updateConfig,
+    setIdError,
+    setValidationResult,
+    setSqlStatements,
+    setStep,
   ])
 
-  const hasValidationErrors = validation.hasDuplicates || validation.hasEmptyPKs
+  const hasValidationErrors = Boolean(
+    validationResult && 
+    (validationResult.hasDuplicates || validationResult.hasEmptyPKs)
+  )
 
   const handleExportSql = useCallback(() => {
-    return generatedSQL.join("\n")
-  }, [generatedSQL])
+    return sqlStatements.join("\n")
+  }, [sqlStatements])
 
   const handleExportXlsx = useCallback(() => {
     if (!activeSheet) return new Blob()
 
-    if (mode === "insert" && idMode === "generate") {
-      const ids = generateIds(idPrefix, idTotalLength, idStartNumber, activeSheet.data.length)
+    if (mode === "insert" && insertConfig.idMode === "generate") {
+      const ids = generateIds(
+        insertConfig.idPrefix,
+        insertConfig.idTotalLength,
+        insertConfig.idStartNumber,
+        activeSheet.data.length
+      )
       const dataWithIds = activeSheet.data.map((row, i) => {
         const newRow = [...row]
-        newRow[insertPkCol] = ids[i]
+        newRow[insertConfig.pkColumn] = ids[i]
         return newRow
       })
       return writeDataToExcel(activeSheet.headers, dataWithIds)
     }
 
     return writeDataToExcel(activeSheet.headers, activeSheet.data)
-  }, [activeSheet, mode, idMode, idPrefix, idTotalLength, idStartNumber, insertPkCol])
+  }, [activeSheet, mode, insertConfig])
 
-  const previewHighlights = useMemo(() => {
-    const map = new Map<number, { type: "duplicate" | "empty-pk" }>()
-    if (validation.hasDuplicates) {
-      for (const d of validation.duplicates) {
+  const {
+    previewHighlights,
+    cellHighlights
+  } = useMemo(() => {
+    const rMap = new Map<number, { type: "duplicate" | "empty-pk" }>()
+    const cMap = new Map<string, { type: "duplicate" | "empty-pk" | "no-match", message?: string }>()
+    
+    if (validationResult?.hasDuplicates) {
+      for (const d of validationResult.duplicates) {
         for (const row of d.rows) {
-          map.set(row - 2, { type: "duplicate" })
+          const rowIdx = row - 2
+          rMap.set(rowIdx, { type: "duplicate" })
+          
+          // Target the specific PK column cell
+          const pkCol = mode === "insert" ? insertConfig.pkColumn : updateConfig.pkColumn
+          cMap.set(`${rowIdx}-${pkCol}`, { 
+            type: "duplicate",
+            message: `${t.sql.duplicatePkTitle}: "${d.value}"`
+          })
         }
       }
     }
-    if (validation.hasEmptyPKs) {
-      for (const row of validation.emptyPKRows) {
-        map.set(row - 2, { type: "empty-pk" })
+    if (validationResult?.hasEmptyPKs) {
+      for (const row of validationResult.emptyPKRows) {
+        const rowIdx = row - 2
+        rMap.set(rowIdx, { type: "empty-pk" })
+        
+        // Target the specific PK column cell
+        const pkCol = mode === "insert" ? insertConfig.pkColumn : updateConfig.pkColumn
+        cMap.set(`${rowIdx}-${pkCol}`, { 
+          type: "empty-pk",
+          message: t.sql.emptyPkTitle
+        })
       }
     }
-    return map
-  }, [validation])
+    return { previewHighlights: rMap, cellHighlights: cMap }
+  }, [validationResult, mode, insertConfig.pkColumn, updateConfig.pkColumn, t.sql.duplicatePkTitle, t.sql.emptyPkTitle])
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">SQL Generator</h1>
-        <p className="text-muted-foreground">
-          Generate PostgreSQL INSERT &amp; UPDATE statements from Excel data
+        <h1 className="text-3xl font-bold tracking-tight text-primary">{t.sql.title}</h1>
+        <p className="text-muted-foreground mt-1">
+          {t.sql.description}
         </p>
       </div>
 
       {/* Step indicator */}
-      <div className="flex items-center gap-2 text-sm">
-        {(["upload", "configure", "preview"] as WizardStep[]).map((s, i) => (
-          <React.Fragment key={s}>
-            {i > 0 && <div className="h-px w-6 bg-border" />}
-            <button
-              onClick={() => {
-                if (s === "upload") return
-                if (s === "configure" && file) setStep("configure")
-                if (s === "preview" && generatedSQL.length > 0) setStep("preview")
-              }}
-              className={`rounded-full px-3 py-1 font-medium capitalize transition-colors ${
-                step === s
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {i + 1}. {s}
-            </button>
-          </React.Fragment>
-        ))}
+      <div className="flex items-center gap-2 text-sm font-mono">
+        {(["upload", "configure", "preview"] as WizardStep[]).map((s, i) => {
+          let stepLabel: string = s;
+          if (s === "upload") stepLabel = t.common.upload;
+          if (s === "configure") stepLabel = t.common.configure;
+          if (s === "preview") stepLabel = t.common.preview;
+
+          return (
+            <React.Fragment key={s}>
+              {i > 0 && <div className="h-px w-6 bg-border" />}
+              <button
+                onClick={() => {
+                  if (s === "upload") return
+                  if (s === "configure" && file) setStep("configure")
+                  if (s === "preview" && sqlStatements.length > 0) setStep("preview")
+                }}
+                className={`rounded-sm px-4 py-1.5 font-medium transition-colors ${
+                  step === s
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground border border-border/50"
+                }`}
+              >
+                {String(i + 1).padStart(2, "0")} {stepLabel}
+              </button>
+            </React.Fragment>
+          )
+        })}
       </div>
 
       {error && (
-        <Alert variant="destructive">
-          <AlertTitle>Error</AlertTitle>
+        <Alert variant="destructive" className="bg-destructive/10 border-destructive/20 text-destructive font-mono">
+          <AlertTitle>{t.common.systemError}</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       {/* Step: Upload */}
       {step === "upload" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Upload Excel File</CardTitle>
+        <Card className="border-border shadow-none rounded-md bg-card/50">
+          <CardHeader className="border-b border-border/50 bg-muted/30 pb-4">
+            <CardTitle className="font-mono text-sm text-muted-foreground tracking-wider">{t.vlookup.ingestionZone}</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-6">
             <FileUploader
               onFileSelect={handleFileSelect}
               currentFile={file}
               onClear={handleClear}
-              disabled={loading}
+              disabled={isLoading}
             />
-            {loading && (
-              <p className="mt-3 text-sm text-muted-foreground animate-pulse">
-                Reading file...
+            {isLoading && (
+              <p className="mt-3 text-xs font-mono text-muted-foreground animate-pulse">
+                {t.common.loading}
               </p>
             )}
           </CardContent>
@@ -353,19 +355,19 @@ export default function SqlGeneratorPage() {
       {/* Step: Configure */}
       {step === "configure" && activeSheet && (
         <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">File & Sheet</CardTitle>
+          <Card className="border-border shadow-none rounded-md">
+            <CardHeader className="border-b border-border/50 bg-muted/30 pb-4">
+              <CardTitle className="font-mono text-sm text-muted-foreground tracking-wider">{t.sql.datasetSelection}</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="pt-6 space-y-4">
               <FileUploader
                 onFileSelect={handleFileSelect}
                 currentFile={file}
                 onClear={handleClear}
               />
               {sheetNames.length > 1 && (
-                <div className="space-y-2">
-                  <Label>Active Sheet</Label>
+                <div className="space-y-2 max-w-sm">
+                  <Label className="font-mono text-xs text-muted-foreground">{t.sql.activeSheet}</Label>
                   <Select
                     value={activeSheetName}
                     onValueChange={handleSheetChange}
@@ -373,65 +375,52 @@ export default function SqlGeneratorPage() {
                   />
                 </div>
               )}
-              <div className="flex gap-2">
-                <Badge variant="secondary">
-                  {activeSheet.headers.length} columns
+              <div className="flex gap-2 font-mono text-sm">
+                <Badge variant="secondary" className="rounded-sm bg-muted/50 border border-border/50">
+                  {activeSheet.headers.length} {t.common.columns}
                 </Badge>
-                <Badge variant="secondary">
-                  {activeSheet.data.length} data rows
+                <Badge variant="secondary" className="rounded-sm bg-muted/50 border border-border/50">
+                  {activeSheet.data.length} {t.common.rows}
                 </Badge>
               </div>
             </CardContent>
           </Card>
 
-          {/* Data preview */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Data Preview</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <SpreadsheetPreview
-                headers={activeSheet.headers}
-                data={activeSheet.data}
-                maxRows={20}
-              />
-            </CardContent>
-          </Card>
-
           {/* Mode tabs */}
           <Tabs value={mode} onValueChange={(v) => setMode(v as "insert" | "update")}>
-            <TabsList className="w-full justify-start">
-              <TabsTrigger value="insert" className="gap-2">
+            <TabsList className="w-full justify-start rounded-sm p-1 bg-muted/50 border border-border">
+              <TabsTrigger value="insert" className="gap-2 rounded-sm font-mono tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 <Database className="h-4 w-4" />
-                INSERT
+                {t.sql.insertMode}
               </TabsTrigger>
-              <TabsTrigger value="update" className="gap-2">
+              <TabsTrigger value="update" className="gap-2 rounded-sm font-mono tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 <Settings2 className="h-4 w-4" />
-                UPDATE
+                {t.sql.updateMode}
               </TabsTrigger>
             </TabsList>
 
             {/* INSERT Config */}
-            <TabsContent value="insert">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">INSERT Configuration</CardTitle>
+            <TabsContent value="insert" className="mt-4">
+              <Card className="border-border shadow-none rounded-md">
+                <CardHeader className="border-b border-border/50 bg-muted/30 pb-4">
+                  <CardTitle className="font-mono text-sm text-muted-foreground tracking-wider">{t.sql.parameters}</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-5">
-                  <div className="grid gap-4 sm:grid-cols-2">
+                <CardContent className="pt-6 space-y-6">
+                  <div className="grid gap-6 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label>Table Name</Label>
+                      <Label className="font-mono text-xs text-muted-foreground">{t.sql.targetTableName}</Label>
                       <Input
-                        value={insertTableName}
-                        onChange={(e) => setInsertTableName(e.target.value)}
+                        value={insertConfig.tableName}
+                        onChange={(e) => setInsertConfig(p => ({ ...p, tableName: e.target.value }))}
                         placeholder="e.g. items"
+                        className="font-mono bg-muted/10 border-border/50"
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label>Primary Key Column</Label>
+                      <Label className="font-mono text-xs text-muted-foreground">{t.sql.pkInjectionColumn}</Label>
                       <Select
-                        value={String(insertPkCol)}
-                        onValueChange={(v) => setInsertPkCol(Number(v))}
+                        value={String(insertConfig.pkColumn)}
+                        onValueChange={(v) => setInsertConfig(p => ({ ...p, pkColumn: Number(v) }))}
                         options={columnOptions}
                       />
                     </div>
@@ -439,104 +428,110 @@ export default function SqlGeneratorPage() {
 
                   {/* ID Mode */}
                   <div className="space-y-3">
-                    <Label>Primary Key Mode</Label>
+                    <Label className="font-mono text-xs text-muted-foreground">{t.sql.pkSource}</Label>
                     <div className="flex gap-3">
                       <button
                         type="button"
-                        onClick={() => setIdMode("generate")}
-                        className={`flex-1 rounded-lg border p-3 text-left text-sm transition-colors ${
-                          idMode === "generate"
-                            ? "border-primary bg-primary/5 font-medium"
-                            : "hover:bg-muted"
+                        onClick={() => setInsertConfig(p => ({ ...p, idMode: "generate" }))}
+                        className={`flex-1 rounded-md border p-4 text-left transition-colors ${
+                          insertConfig.idMode === "generate"
+                            ? "border-primary bg-primary/10 shadow-sm"
+                            : "hover:bg-muted/50 border-border/50 bg-muted/10"
                         }`}
                       >
-                        <div className="font-medium">Generate new IDs</div>
-                        <div className="text-xs text-muted-foreground">
-                          Auto-generate sequential IDs with a prefix
+                        <div className="font-mono text-sm font-semibold">{t.sql.algorithmicGen}</div>
+                        <div className="text-xs text-muted-foreground mt-1 font-mono">
+                          {t.sql.algorithmicGenDesc}
                         </div>
                       </button>
                       <button
                         type="button"
-                        onClick={() => setIdMode("existing")}
-                        className={`flex-1 rounded-lg border p-3 text-left text-sm transition-colors ${
-                          idMode === "existing"
-                            ? "border-primary bg-primary/5 font-medium"
-                            : "hover:bg-muted"
+                        onClick={() => setInsertConfig(p => ({ ...p, idMode: "existing" }))}
+                        className={`flex-1 rounded-md border p-4 text-left transition-colors ${
+                          insertConfig.idMode === "existing"
+                            ? "border-primary bg-primary/10 shadow-sm"
+                            : "hover:bg-muted/50 border-border/50 bg-muted/10"
                         }`}
                       >
-                        <div className="font-medium">Use IDs from Excel</div>
-                        <div className="text-xs text-muted-foreground">
-                          Use existing values in the PK column
+                        <div className="font-mono text-sm font-semibold">{t.sql.inheritExisting}</div>
+                        <div className="text-xs text-muted-foreground mt-1 font-mono">
+                          {t.sql.inheritExistingDesc}
                         </div>
                       </button>
                     </div>
                   </div>
 
                   {/* ID Generation Settings */}
-                  {idMode === "generate" && (
-                    <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
-                      <p className="text-sm font-medium">ID Generation Settings</p>
-                      <div className="grid gap-4 sm:grid-cols-3">
+                  {insertConfig.idMode === "generate" && (
+                    <div className="rounded-md border border-border/50 bg-muted/10 p-5 space-y-5">
+                      <p className="font-mono text-sm text-muted-foreground tracking-wider">{t.sql.algorithmConstraints}</p>
+                      <div className="grid gap-5 sm:grid-cols-3">
                         <div className="space-y-2">
-                          <Label className="text-xs">Prefix</Label>
+                          <Label className="font-mono text-xs">{t.sql.prefixString}</Label>
                           <Input
-                            value={idPrefix}
-                            onChange={(e) => setIdPrefix(e.target.value)}
-                            placeholder="e.g. 14520000"
+                            value={insertConfig.idPrefix}
+                            onChange={(e) => setInsertConfig(p => ({ ...p, idPrefix: e.target.value }))}
+                            placeholder="e.g. ID-"
+                            className="font-mono bg-background"
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label className="text-xs">Total ID Length</Label>
+                          <Label className="font-mono text-xs">{t.sql.absoluteLength}</Label>
                           <Input
                             type="number"
-                            value={idTotalLength}
-                            onChange={(e) => setIdTotalLength(Number(e.target.value))}
+                            value={insertConfig.idTotalLength}
+                            onChange={(e) => setInsertConfig(p => ({ ...p, idTotalLength: Number(e.target.value) }))}
                             min={1}
+                            className="font-mono bg-background"
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label className="text-xs">Starting Number</Label>
+                          <Label className="font-mono text-xs">{t.sql.startIndex}</Label>
                           <Input
                             type="number"
-                            value={idStartNumber}
-                            onChange={(e) => setIdStartNumber(Number(e.target.value))}
+                            value={insertConfig.idStartNumber}
+                            onChange={(e) => setInsertConfig(p => ({ ...p, idStartNumber: Number(e.target.value) }))}
                             min={0}
+                            className="font-mono bg-background"
                           />
                         </div>
                       </div>
-                      {idPrefix && idTotalLength > idPrefix.length && (
-                        <p className="text-xs text-muted-foreground">
-                          Preview: <code className="rounded bg-muted px-1 font-mono">
-                            {idPrefix}{String(idStartNumber).padStart(idTotalLength - idPrefix.length, "0")}
-                          </code>
-                          {" → "}
-                          <code className="rounded bg-muted px-1 font-mono">
-                            {idPrefix}{String(idStartNumber + Math.max(0, (activeSheet?.data.length ?? 1) - 1)).padStart(idTotalLength - idPrefix.length, "0")}
-                          </code>
-                        </p>
+                      {insertConfig.idPrefix && insertConfig.idTotalLength > insertConfig.idPrefix.length && (
+                        <div className="bg-background border border-border/50 rounded p-3">
+                          <p className="font-mono text-xs text-muted-foreground flex items-center gap-2">
+                            <span className="text-[10px] tracking-wider">{t.sql.validationOutput}</span>
+                            <code className="text-primary font-bold">
+                              {insertConfig.idPrefix}{String(insertConfig.idStartNumber).padStart(insertConfig.idTotalLength - insertConfig.idPrefix.length, "0")}
+                            </code>
+                            {" → "}
+                            <code className="text-primary font-bold">
+                              {insertConfig.idPrefix}{String(insertConfig.idStartNumber + Math.max(0, (activeSheet?.data.length ?? 1) - 1)).padStart(insertConfig.idTotalLength - insertConfig.idPrefix.length, "0")}
+                            </code>
+                          </p>
+                        </div>
                       )}
                     </div>
                   )}
 
                   {/* Options */}
-                  <div className="flex flex-wrap gap-4">
-                    <label className="flex items-center gap-2 text-sm">
+                  <div className="flex flex-wrap gap-6 pt-2 border-t border-border/30">
+                    <label className="flex items-center gap-2 text-sm font-mono">
                       <input
                         type="checkbox"
-                        checked={includeColNames}
-                        onChange={(e) => setIncludeColNames(e.target.checked)}
-                        className="rounded border-input"
+                        checked={insertConfig.includeColumnNames}
+                        onChange={(e) => setInsertConfig(p => ({ ...p, includeColumnNames: e.target.checked }))}
+                        className="rounded border-input bg-muted"
                       />
-                      Include column names in INSERT
+                      {t.sql.includeColumnNames}
                     </label>
-                    <label className="flex items-center gap-2 text-sm">
+                    <label className="flex items-center gap-2 text-sm font-mono">
                       <input
                         type="checkbox"
-                        checked={treatEmptyAsNull}
-                        onChange={(e) => setTreatEmptyAsNull(e.target.checked)}
-                        className="rounded border-input"
+                        checked={insertConfig.treatEmptyAsNull}
+                        onChange={(e) => setInsertConfig(p => ({ ...p, treatEmptyAsNull: e.target.checked }))}
+                        className="rounded border-input bg-muted"
                       />
-                      Treat empty cells as NULL
+                      {t.sql.emptyCellsAsNull}
                     </label>
                   </div>
                 </CardContent>
@@ -544,84 +539,87 @@ export default function SqlGeneratorPage() {
             </TabsContent>
 
             {/* UPDATE Config */}
-            <TabsContent value="update">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">UPDATE Configuration</CardTitle>
+            <TabsContent value="update" className="mt-4">
+              <Card className="border-border shadow-none rounded-md">
+                <CardHeader className="border-b border-border/50 bg-muted/30 pb-4">
+                  <CardTitle className="font-mono text-sm text-muted-foreground tracking-wider">{t.sql.parameters}</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-5">
-                  <div className="grid gap-4 sm:grid-cols-2">
+                <CardContent className="pt-6 space-y-6">
+                  <div className="grid gap-6 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label>Table Name</Label>
+                      <Label className="font-mono text-xs text-muted-foreground">{t.sql.targetTableName}</Label>
                       <Input
-                        value={updateTableName}
-                        onChange={(e) => setUpdateTableName(e.target.value)}
+                        value={updateConfig.tableName}
+                        onChange={(e) => setUpdateConfig(p => ({ ...p, tableName: e.target.value }))}
                         placeholder="e.g. items"
+                        className="font-mono bg-muted/10 border-border/50"
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label>Primary Key Column (WHERE clause)</Label>
+                      <Label className="font-mono text-xs text-muted-foreground">{t.sql.pkWhereClause}</Label>
                       <Select
-                        value={String(updatePkCol)}
-                        onValueChange={(v) => setUpdatePkCol(Number(v))}
+                        value={String(updateConfig.pkColumn)}
+                        onValueChange={(v) => setUpdateConfig(p => ({ ...p, pkColumn: Number(v) }))}
                         options={columnOptions}
                       />
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <Label>Columns to SET (click to toggle)</Label>
-                    <div className="flex flex-wrap gap-2">
+                  <div className="space-y-3">
+                    <Label className="font-mono text-xs text-muted-foreground">{t.sql.targetSetColumns}</Label>
+                    <div className="flex flex-wrap gap-2 p-4 rounded-md border border-border/50 bg-muted/10">
                       {activeSheet.headers.map((h, i) => {
-                        if (i === updatePkCol) return null
-                        const isSelected = setColumns.includes(i)
+                        if (i === updateConfig.pkColumn) return null
+                        const isSelected = updateConfig.setColumns.includes(i)
                         return (
                           <button
                             key={i}
                             type="button"
                             onClick={() => toggleSetColumn(i)}
-                            className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                            className={`rounded border px-3 py-1.5 font-mono text-xs transition-colors ${
                               isSelected
-                                ? "border-primary bg-primary/10 font-medium text-primary"
-                                : "hover:bg-muted"
+                                ? "border-primary bg-primary/20 text-primary-foreground font-semibold"
+                                : "border-border/50 bg-background hover:bg-muted/80 text-muted-foreground"
                             }`}
                           >
-                            {columnIndexToLetter(i)}: {h}
+                            <span className="opacity-50 mr-1">{columnIndexToLetter(i)}</span> {h}
                           </button>
                         )
                       })}
                     </div>
-                    {setColumns.length > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        {setColumns.length} column{setColumns.length !== 1 ? "s" : ""} selected
+                    {updateConfig.setColumns.length > 0 && (
+                      <p className="text-xs font-mono text-primary font-semibold">
+                        {updateConfig.setColumns.length} {t.sql.activeSetColumns}
                       </p>
                     )}
                   </div>
 
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={treatEmptyAsNull}
-                      onChange={(e) => setTreatEmptyAsNull(e.target.checked)}
-                      className="rounded border-input"
-                    />
-                    Treat empty cells as NULL
-                  </label>
+                  <div className="pt-2 border-t border-border/30">
+                    <label className="flex items-center gap-2 text-sm font-mono">
+                      <input
+                        type="checkbox"
+                        checked={updateConfig.treatEmptyAsNull}
+                        onChange={(e) => setUpdateConfig(p => ({ ...p, treatEmptyAsNull: e.target.checked }))}
+                        className="rounded border-input bg-muted"
+                      />
+                      {t.sql.emptyCellsAsNull}
+                    </label>
+                  </div>
                 </CardContent>
               </Card>
             </TabsContent>
           </Tabs>
 
           {idError && (
-            <Alert variant="destructive">
-              <AlertTitle>ID Generation Error</AlertTitle>
-              <AlertDescription>{idError}</AlertDescription>
+            <Alert variant="destructive" className="bg-destructive/10 border-destructive/20 text-destructive font-mono">
+              <AlertTitle>{t.sql.algoError.replace("{type}", idError.type)}</AlertTitle>
+              <AlertDescription>{idError.message}</AlertDescription>
             </Alert>
           )}
 
-          <div className="flex justify-end">
-            <Button onClick={handleGenerate} disabled={!canGenerate} className="gap-2">
-              Generate SQL
+          <div className="flex justify-end pt-4">
+            <Button onClick={handleGenerate} disabled={!canGenerate} className="gap-2 rounded-sm font-mono tracking-wide h-12 px-8">
+              {t.sql.compileStatements}
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
@@ -631,43 +629,65 @@ export default function SqlGeneratorPage() {
       {/* Step: Preview */}
       {step === "preview" && (
         <div className="space-y-6">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 bg-muted/30 p-3 rounded-md border border-border">
             <Button
               variant="outline"
               size="sm"
               onClick={() => setStep("configure")}
-              className="gap-1"
+              className="gap-1 rounded-sm font-mono text-xs"
             >
-              <ArrowLeft className="h-4 w-4" />
-              Back
+              <ArrowLeft className="h-3.5 w-3.5" />
+              {t.sql.recompile}
             </Button>
-            <Badge variant="secondary">
-              {mode.toUpperCase()} — {generatedSQL.length} statements
+            <div className="w-px h-6 bg-border mx-2" />
+            <Badge variant="secondary" className="rounded-sm font-mono text-xs bg-muted border border-border uppercase">
+              {mode} MODE
+            </Badge>
+            <Badge variant="secondary" className="rounded-sm font-mono text-xs bg-primary/20 text-primary border-0">
+              {sqlStatements.length} {t.sql.statements}
             </Badge>
           </div>
 
-          <DuplicateWarning
-            duplicates={validation.duplicates}
-            emptyPKRows={validation.emptyPKRows}
-          />
-
-          {activeSheet && (
-            <SpreadsheetPreview
-              headers={activeSheet.headers}
-              data={activeSheet.data}
-              rowHighlights={previewHighlights}
-              maxRows={50}
+          {validationResult && (
+            <DuplicateWarning
+              duplicates={validationResult.duplicates}
+              emptyPKRows={validationResult.emptyPKRows}
             />
           )}
 
-          <SqlPreview statements={generatedSQL} />
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="flex flex-col gap-2 h-full">
+              <Label className="font-mono text-xs text-muted-foreground">{t.sql.gridValidator}</Label>
+              {activeSheet && (
+                <VirtualizedGrid
+                  headers={activeSheet.headers}
+                  data={activeSheet.data}
+                  rowHighlights={previewHighlights}
+                  cellHighlights={cellHighlights}
+                  className="flex-1 min-h-[400px]"
+                />
+              )}
+            </div>
+            
+            <div className="flex flex-col gap-2 h-full">
+              <Label className="font-mono text-xs text-muted-foreground">{t.sql.compiledOutput}</Label>
+              <SqlPreview statements={sqlStatements} />
+            </div>
+          </div>
 
-          <div className="flex justify-end">
+          <div className="flex items-center justify-between pt-4 border-t border-border">
+            <div className="text-sm font-mono text-muted-foreground">
+              {hasValidationErrors ? (
+                <span className="text-destructive font-semibold">{t.sql.exportLocked}</span>
+              ) : (
+                <span className="text-success font-semibold">{t.sql.integrityVerified}</span>
+              )}
+            </div>
             <ExportButtons
               onExportSql={handleExportSql}
               onExportXlsx={handleExportXlsx}
               disabled={hasValidationErrors}
-              fileNameBase={`${mode}_${mode === "insert" ? insertTableName : updateTableName}_${Date.now()}`}
+              fileNameBase={`${mode}_${mode === "insert" ? insertConfig.tableName : updateConfig.tableName}_${Date.now()}`}
             />
           </div>
         </div>
